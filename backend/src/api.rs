@@ -213,7 +213,7 @@ async fn hydrate(pool: &SqlitePool, matches: Vec<MatchRow>) -> AppResult<Vec<Mat
             .push(PerformanceDetail { row, player_name, agent_role });
     }
     for list in by_match.values_mut() {
-        list.sort_by(|a, b| b.row.acs.cmp(&a.row.acs));
+        list.sort_by_key(|p| std::cmp::Reverse(p.row.acs));
     }
 
     Ok(matches

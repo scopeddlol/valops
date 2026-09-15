@@ -161,7 +161,9 @@ curl -X POST http://localhost:8080/api/import/json \
 
 ## Running without Docker
 
-Two terminals; the Vite dev server proxies `/api` to the Rust process.
+The Rust toolchain is pinned in `backend/rust-toolchain.toml`, so rustup picks
+up the same compiler CI and the Docker build use. Two terminals; the Vite dev
+server proxies `/api` to the Rust process.
 
 ```bash
 cd backend && cargo run                  # http://127.0.0.1:8080

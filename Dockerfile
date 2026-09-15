@@ -21,7 +21,7 @@ WORKDIR /src
 
 # Warm the dependency cache against a stub main, so editing application code
 # does not trigger a full recompile of the dependency tree.
-COPY backend/Cargo.toml backend/Cargo.lock ./
+COPY backend/Cargo.toml backend/Cargo.lock backend/rust-toolchain.toml ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs \
     && cargo build --release \
     && rm -rf src
