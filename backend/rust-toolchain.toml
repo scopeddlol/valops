@@ -1,0 +1,10 @@
+# Pinned so the compiler is the same everywhere: a developer's machine, CI, and
+# the Docker build. Without this, `clippy -D warnings` in CI floats with
+# whatever Rust the runner ships, and a new release can turn a pull request red
+# without a line of code changing — which is exactly what happened on the first
+# run of the Docker workflow.
+#
+# Bump deliberately, with a run of `cargo clippy --all-targets -- -D warnings`.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]

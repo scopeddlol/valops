@@ -1,0 +1,149 @@
+name: Docker
+
+# Builds the image on every pull request (without pushing), and publishes to
+# GHCR on main and on version tags. The PR build is the point: it is what keeps
+# the Dockerfile from rotting between releases.
+#
+# Architecture: linux/amd64 only, deliberately. Multi-arch through QEMU makes
+# the Rust stage roughly an order of magnitude slower and tends to hit the job
+# timeout. To add arm64, prefer native runners over emulation — give this job a
+# matrix over `ubuntu-latest` and `ubuntu-24.04-arm`, push by digest, and merge
+# the digests into one manifest in a follow-up job. (ARM runners are free for
+# public repositories; private ones need a paid plan.)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # GHCR requires a lowercase path. `scopeddlol/valops` already is; a rename to
+  # anything with capitals would need `tr '[:upper:]' '[:lower:]'` here.
+  IMAGE_NAME: ${{ github.repository }}
+
+# Superseded runs on the same branch are pointless once a newer commit lands.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            backend/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock', 'backend/rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Backend tests
+        working-directory: backend
+        run: cargo test --locked
+
+      - name: Backend lint
+        working-directory: backend
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend typecheck and build
+        working-directory: frontend
+        run: npm run build
+
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Skipped for pull requests: a fork's token cannot write packages, and a
+      # PR has nothing to publish anyway.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=valops
+            org.opencontainers.image.description=Roster, map form and comp analytics for a Valorant five-stack
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          # A pull request has nowhere to push, so load the image into the local
+          # daemon instead — otherwise the smoke test below would have nothing
+          # to run and "the image builds" would be all a green check meant.
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Without this the registry gets an extra attestation manifest that
+          # shows up as an "unknown/unknown" architecture in the package list.
+          provenance: false
+
+      # Proves the image actually runs, rather than merely building. Runs on
+      # every event: on a pull request against the locally loaded image, and
+      # after a push against the one that was just published.
+      - name: Smoke test the image
+        run: |
+          IMAGE=$(echo '${{ steps.meta.outputs.tags }}' | head -n1)
+          docker run -d --name valops-smoke -p 8080:8080 "$IMAGE"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/health > /dev/null; then
+              echo "health check passed"
+              curl -fsS http://127.0.0.1:8080/api/stats/overview | head -c 200; echo
+              docker rm -f valops-smoke
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the container never became healthy"
+          docker logs valops-smoke
+          exit 1
