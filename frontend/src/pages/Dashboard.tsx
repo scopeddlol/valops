@@ -288,7 +288,7 @@ export default function Dashboard() {
                   <div className="card-head">
                     <div className="grow">
                       <div className="card-title">Best agent</div>
-                      <div className="card-sub">Highest smoothed win rate, 3+ picks</div>
+                      <div className="card-sub">Best record you can trust, 5+ picks</div>
                     </div>
                   </div>
                   <div className="card-body">
