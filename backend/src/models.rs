@@ -9,6 +9,9 @@ pub struct Player {
     pub rank: Option<String>,
     pub active: bool,
     pub created_at: String,
+    /// Riot's stable player id. Lets imported matches attach to the right
+    /// person even after a display-name change.
+    pub puuid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -22,6 +25,8 @@ pub struct PlayerInput {
     pub rank: Option<String>,
     #[serde(default = "default_true")]
     pub active: bool,
+    #[serde(default)]
+    pub puuid: Option<String>,
 }
 
 fn default_role() -> String {
@@ -40,6 +45,8 @@ pub struct MatchRow {
     pub rounds_won: i64,
     pub rounds_lost: i64,
     pub notes: Option<String>,
+    /// 'manual', 'demo', 'import', or the name of the source it was pulled from.
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]

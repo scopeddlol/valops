@@ -25,6 +25,7 @@ clean with `VALOPS_SEED_DEMO=false`.
 | **Maps** | Every map with record, round differential, agent picks, plus a player × map K/D heatmap |
 | **Agents** | Pick rates, win rates, a player × agent mastery grid, and the agents nobody in the stack has touched |
 | **Matches** | The match log with full scoreboards, and the form for logging a new one |
+| **Import** | Bring history in from a file or pull it by Riot ID, with a preview before anything is written |
 
 ## How the team builder decides
 
@@ -62,9 +63,75 @@ Everything is an environment variable; the defaults are what compose uses.
 | `VALOPS_STATIC_DIR` | `/app/static` | Built frontend to serve |
 | `VALOPS_SEED_DEMO` | `true` | Seed demo history when the database is empty |
 | `VALOPS_SEED_SESSIONS` | `45` | How many play sessions the demo generates |
+| `VALOPS_HENRIK_KEY` | *(unset)* | HenrikDev API key. Without it, file import still works; with it, the Riot ID tab is enabled |
 | `RUST_LOG` | `valops=info,tower_http=warn` | Log filter |
 
 Change the published port with `VALOPS_PORT=9000 docker compose up -d`.
+
+## Getting data in
+
+Four ways, all of which land in the same place:
+
+**1. Log it by hand.** Matches → Log match. The form pre-fills each player's
+most-played agent and the map you last played, so it is mostly typing the
+scoreboard.
+
+**2. A CSV from a spreadsheet.** Import → File. One row per player per match;
+rows sharing a `played_at` and `map` are grouped into one match. Grab the
+header from the *CSV template* button, or:
+
+```
+played_at,map,mode,rounds_won,rounds_lost,player,agent,kills,deaths,assists,acs,first_bloods,first_deaths,plants,defuses,notes
+2026-09-15T21:30:00,Ascent,Competitive,13,9,Vex,Jett,22,15,4,271,6,3,1,0,
+2026-09-15T21:30:00,Ascent,Competitive,13,9,Nyx,Omen,15,16,9,198,1,2,3,1,
+```
+
+Only `played_at`, `map`, `player` and `agent` are required. A `player` written
+as `Name#TAG` is matched by Riot ID; anything else is matched by name.
+
+**3. A previous export.** Import → File, or the Backup tab. This is the restore
+path for the JSON that `/api/export` produces.
+
+**4. Pull by Riot ID.** Import → Riot ID, which fetches recent matches through
+the HenrikDev API and keeps the rows belonging to players on your roster. Needs
+`VALOPS_HENRIK_KEY`; keys are requested on their Discord. See the caveat below.
+
+Every route previews before it writes: run **Preview** (a dry run inside a
+transaction that is rolled back), look at exactly which matches would land, then
+commit. Re-running an import is safe — a match already present is skipped, not
+duplicated.
+
+### On the Riot ID source
+
+**This source's response mapping has not been run against the live API.** It was
+written from the documented endpoint and auth scheme in an environment where
+`api.henrikdev.xyz` was unreachable, so the field mapping is an informed
+reconstruction rather than a verified one. Everything else on this page —
+CSV, JSON, dedup, preview — was tested end to end.
+
+To make that safe rather than merely disclosed, the mapper is deliberately
+tolerant (each field is looked up through several candidate paths, covering the
+shapes v2 and v4 are documented to use) and it ships with a **probe**: click
+*Run probe*, or
+
+```bash
+curl -X POST http://localhost:8080/api/sources/henrik/probe \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Vex#EUW","region":"eu"}'
+```
+
+It fetches without importing and reports which fields it resolved, which it
+could not, and the keys the API actually returned — enough to turn a mismatch
+into a one-line fix in `backend/src/sources/henrik.rs`.
+
+Two known limits of this source: opening duels (first bloods and first deaths)
+are not exposed at match level, so imported matches record them as zero; and
+combat score is converted to ACS by dividing by rounds played.
+
+Other sources are not available rather than unimplemented: **tracker.gg has no
+public API for reading match history** (their developer API is for pushing match
+data *to* them from game servers), and Riot's own Valorant match endpoints have
+historically required a production key granted only to approved applications.
 
 ## Your data
 
@@ -74,8 +141,13 @@ Matches live in the `valops-data` volume, mounted at `/app/data`.
 # Back up
 docker compose exec valops cat /app/data/valops.db > valops-backup.db
 
-# Or export everything as JSON (also available from the Matches page)
+# Or export everything as JSON (Import -> Backup does the same)
 curl http://localhost:8080/api/export > valops-export.json
+
+# Restore it
+curl -X POST http://localhost:8080/api/import/json \
+  -H 'Content-Type: application/json' \
+  -d "$(jq '. + {options:{dry_run:false}}' valops-export.json)"
 ```
 
 ## Running without Docker
@@ -118,6 +190,12 @@ GET    /api/stats/comps             five-agent compositions and their records
 
 GET    /api/builder?map=Ascent&players=1,2,3,4,5&locks=1:Jett&exclude=Reyna
 GET    /api/export                  everything as JSON
+POST   /api/import/json             restore an export (body: bundle + options)
+POST   /api/import/csv              import a CSV (text/csv body, ?dry_run=true)
+GET    /api/import/template.csv     a starter CSV with the right header
+GET    /api/sources                 which sources this deployment can use
+POST   /api/sources/henrik/sync     pull matches for a Riot ID
+POST   /api/sources/henrik/probe    fetch without importing and report the field mapping
 
 POST   /api/demo/seed?sessions=45   regenerate demo history
 DELETE /api/demo/reset              delete all data
@@ -125,6 +203,13 @@ DELETE /api/demo/reset              delete all data
 
 Every `/api/stats/*` endpoint accepts `days`, `map` and `mode` filters, e.g.
 `/api/stats/maps?days=30&mode=Premier`.
+
+Importing a CSV, previewing first:
+
+```bash
+curl -X POST 'http://localhost:8080/api/import/csv?dry_run=true' \
+  -H 'Content-Type: text/csv' --data-binary @matches.csv
+```
 
 Logging a match:
 
@@ -150,4 +235,4 @@ curl -X POST http://localhost:8080/api/matches \
   built frontend, with migrations embedded at compile time.
 - **Frontend** — TypeScript: React and Vite. Charts are hand-rolled SVG (no
   charting dependency); fonts are bundled, so the UI needs no internet at all.
-- **Image** — multi-stage build, non-root, ~5.6 MB binary on `debian:bookworm-slim`.
+- **Image** — multi-stage build, non-root, ~9.5 MB binary on `debian:bookworm-slim`.

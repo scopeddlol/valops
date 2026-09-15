@@ -10,6 +10,9 @@ services:
       # Set to "false" to start with an empty database instead of demo history.
       VALOPS_SEED_DEMO: "${VALOPS_SEED_DEMO:-true}"
       RUST_LOG: "${RUST_LOG:-valops=info,tower_http=warn}"
+      # Optional: a HenrikDev API key enables pulling matches by Riot ID.
+      # Leave unset and file import still works.
+      VALOPS_HENRIK_KEY: "${VALOPS_HENRIK_KEY:-}"
     volumes:
       # Your matches live here. Back this up and your history is safe.
       - valops-data:/app/data

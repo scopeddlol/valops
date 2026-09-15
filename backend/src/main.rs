@@ -9,8 +9,10 @@ mod builder;
 mod catalog;
 mod db;
 mod error;
+mod import;
 mod models;
 mod seed;
+mod sources;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

@@ -8,6 +8,7 @@ import Roster from './pages/Roster';
 import Maps from './pages/Maps';
 import Agents from './pages/Agents';
 import Matches from './pages/Matches';
+import ImportPage from './pages/Import';
 
 interface FilterContextValue {
   days: number | null;
@@ -49,6 +50,7 @@ export default function App() {
             <Route path="/maps" element={<Maps />} />
             <Route path="/agents" element={<Agents />} />
             <Route path="/matches" element={<Matches />} />
+            <Route path="/import" element={<ImportPage />} />
             <Route path="*" element={<Dashboard />} />
           </Routes>
         </main>

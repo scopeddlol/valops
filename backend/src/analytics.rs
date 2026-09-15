@@ -40,12 +40,12 @@ pub struct Dataset {
 impl Dataset {
     pub async fn load(pool: &SqlitePool, filter: &StatsFilter) -> AppResult<Self> {
         let players: Vec<Player> =
-            sqlx::query_as("SELECT id, name, riot_id, role, rank, active, created_at FROM players ORDER BY name")
+            sqlx::query_as("SELECT id, name, riot_id, role, rank, active, created_at, puuid FROM players ORDER BY name")
                 .fetch_all(pool)
                 .await?;
 
         let mut sql = String::from(
-            "SELECT id, played_at, map, mode, rounds_won, rounds_lost, notes FROM matches WHERE 1=1",
+            "SELECT id, played_at, map, mode, rounds_won, rounds_lost, notes, source FROM matches WHERE 1=1",
         );
         if filter.days.is_some() {
             sql.push_str(" AND played_at >= datetime('now', ?)");

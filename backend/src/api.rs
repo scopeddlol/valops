@@ -13,8 +13,10 @@ use crate::analytics::{self, Dataset, StatsFilter};
 use crate::builder::{self, BuilderQuery};
 use crate::catalog;
 use crate::error::{AppError, AppResult};
+use crate::import::{self, ImportOptions};
 use crate::models::*;
 use crate::seed;
+use crate::sources::henrik;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -39,6 +41,12 @@ pub fn router(state: AppState) -> Router {
         .route("/stats/comps", get(stats_comps))
         .route("/builder", get(get_builder))
         .route("/export", get(export_all))
+        .route("/import/json", post(import_json))
+        .route("/import/csv", post(import_csv))
+        .route("/import/template.csv", get(csv_template))
+        .route("/sources", get(list_sources))
+        .route("/sources/henrik/sync", post(henrik_sync))
+        .route("/sources/henrik/probe", post(henrik_probe))
         .route("/demo/seed", post(seed_demo))
         .route("/demo/reset", delete(reset_demo))
         .with_state(state)
@@ -60,7 +68,7 @@ async fn get_catalog() -> Json<Value> {
 // Players
 // ---------------------------------------------------------------------------
 
-const PLAYER_COLUMNS: &str = "id, name, riot_id, role, rank, active, created_at";
+const PLAYER_COLUMNS: &str = "id, name, riot_id, role, rank, active, created_at, puuid";
 
 async fn list_players(State(st): State<AppState>) -> AppResult<Json<Vec<Player>>> {
     let rows: Vec<Player> = sqlx::query_as(&format!(
@@ -92,7 +100,7 @@ async fn create_player(
         return Err(AppError::BadRequest("A player needs a name".into()));
     }
     let row: Player = sqlx::query_as(&format!(
-        "INSERT INTO players (name, riot_id, role, rank, active) VALUES (?, ?, ?, ?, ?) \
+        "INSERT INTO players (name, riot_id, role, rank, active, puuid) VALUES (?, ?, ?, ?, ?, ?) \
          RETURNING {PLAYER_COLUMNS}"
     ))
     .bind(name)
@@ -100,6 +108,7 @@ async fn create_player(
     .bind(input.role.trim())
     .bind(input.rank.as_deref().map(str::trim).filter(|s| !s.is_empty()))
     .bind(input.active)
+    .bind(input.puuid.as_deref().map(str::trim).filter(|s| !s.is_empty()))
     .fetch_one(&st.pool)
     .await?;
     Ok(Json(row))
@@ -111,14 +120,15 @@ async fn update_player(
     Json(input): Json<PlayerInput>,
 ) -> AppResult<Json<Player>> {
     let row: Option<Player> = sqlx::query_as(&format!(
-        "UPDATE players SET name = ?, riot_id = ?, role = ?, rank = ?, active = ? \
-         WHERE id = ? RETURNING {PLAYER_COLUMNS}"
+        "UPDATE players SET name = ?, riot_id = ?, role = ?, rank = ?, active = ?, \
+         puuid = COALESCE(?, puuid) WHERE id = ? RETURNING {PLAYER_COLUMNS}"
     ))
     .bind(input.name.trim())
     .bind(input.riot_id.as_deref().map(str::trim).filter(|s| !s.is_empty()))
     .bind(input.role.trim())
     .bind(input.rank.as_deref().map(str::trim).filter(|s| !s.is_empty()))
     .bind(input.active)
+    .bind(input.puuid.as_deref().map(str::trim).filter(|s| !s.is_empty()))
     .bind(id)
     .fetch_optional(&st.pool)
     .await?;
@@ -141,7 +151,7 @@ async fn delete_player(State(st): State<AppState>, Path(id): Path<i64>) -> AppRe
 // Matches
 // ---------------------------------------------------------------------------
 
-const MATCH_COLUMNS: &str = "id, played_at, map, mode, rounds_won, rounds_lost, notes";
+const MATCH_COLUMNS: &str = "id, played_at, map, mode, rounds_won, rounds_lost, notes, source";
 
 #[derive(Debug, Deserialize)]
 struct MatchListQuery {
@@ -377,4 +387,224 @@ async fn seed_demo(
 async fn reset_demo(State(st): State<AppState>) -> AppResult<Json<Value>> {
     seed::wipe(&st.pool).await?;
     Ok(Json(json!({ "reset": true })))
+}
+
+// ---------------------------------------------------------------------------
+// Import
+// ---------------------------------------------------------------------------
+
+/// A body of `{ options, ...bundle }` — the options ride alongside the data so
+/// the same payload can be posted twice, once to preview and once for real.
+#[derive(Debug, Deserialize)]
+struct JsonImportBody {
+    #[serde(default)]
+    options: ImportOptions,
+    #[serde(flatten)]
+    bundle: import::JsonBundle,
+}
+
+async fn import_json(
+    State(st): State<AppState>,
+    Json(body): Json<JsonImportBody>,
+) -> AppResult<Json<import::ImportReport>> {
+    let matches = import::from_json(body.bundle)?;
+    let report = import::apply(&st.pool, matches, &body.options).await?;
+    Ok(Json(report))
+}
+
+#[derive(Debug, Deserialize)]
+struct CsvQuery {
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default = "yes")]
+    create_missing_players: bool,
+    #[serde(default = "yes")]
+    skip_existing: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Takes the CSV as a plain text body, so `curl --data-binary @file.csv` works
+/// and the browser can post a dropped file unchanged.
+async fn import_csv(
+    State(st): State<AppState>,
+    Query(q): Query<CsvQuery>,
+    body: String,
+) -> AppResult<Json<import::ImportReport>> {
+    let matches = import::from_csv(&body)?;
+    let opts = ImportOptions {
+        dry_run: q.dry_run,
+        create_missing_players: q.create_missing_players,
+        skip_existing: q.skip_existing,
+    };
+    Ok(Json(import::apply(&st.pool, matches, &opts).await?))
+}
+
+async fn csv_template() -> impl axum::response::IntoResponse {
+    (
+        [
+            ("content-type", "text/csv; charset=utf-8"),
+            ("content-disposition", "attachment; filename=\"valops-template.csv\""),
+        ],
+        format!(
+            "{}\n2026-09-15T21:30:00,Ascent,Competitive,13,9,Vex,Jett,22,15,4,271,6,3,1,0,\n\
+             2026-09-15T21:30:00,Ascent,Competitive,13,9,Nyx,Omen,15,16,9,198,1,2,3,1,\n",
+            import::CSV_TEMPLATE
+        ),
+    )
+}
+
+/// What sources this deployment can actually use, so the UI can explain the
+/// setup step instead of failing at click time.
+async fn list_sources() -> Json<Value> {
+    let henrik_key = std::env::var("VALOPS_HENRIK_KEY").unwrap_or_default();
+    Json(json!({
+        "sources": [
+            {
+                "id": "henrikdev",
+                "name": "HenrikDev API",
+                "kind": "api",
+                "configured": !henrik_key.trim().is_empty(),
+                "regions": henrik::REGIONS,
+                "platforms": ["pc", "console"],
+                "setup": "Request a key on the HenrikDev Discord, then set VALOPS_HENRIK_KEY and restart.",
+                "verified": false,
+                "caveat": "The response mapping for this source has not been run against the live API. \
+                           Use the probe first — it reports which fields mapped.",
+            },
+            {
+                "id": "json",
+                "name": "JSON (a valops export)",
+                "kind": "file",
+                "configured": true,
+                "verified": true,
+            },
+            {
+                "id": "csv",
+                "name": "CSV (spreadsheet)",
+                "kind": "file",
+                "configured": true,
+                "verified": true,
+            }
+        ]
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct HenrikBody {
+    /// "Name#TAG", or a name with `tag` given separately.
+    name: String,
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default = "default_region")]
+    region: String,
+    #[serde(default = "default_platform")]
+    platform: String,
+    /// Queue to keep, e.g. "Competitive". Empty keeps everything.
+    #[serde(default = "default_queue")]
+    mode: String,
+    #[serde(default = "default_size")]
+    size: usize,
+    #[serde(default)]
+    options: ImportOptions,
+}
+
+fn default_region() -> String {
+    "eu".into()
+}
+fn default_platform() -> String {
+    "pc".into()
+}
+fn default_queue() -> String {
+    "Competitive".into()
+}
+fn default_size() -> usize {
+    10
+}
+
+impl HenrikBody {
+    /// Accept either "Vex#EUW" in `name` or name and tag as separate fields.
+    fn name_and_tag(&self) -> AppResult<(String, String)> {
+        if let Some(tag) = self.tag.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            return Ok((self.name.trim().to_string(), tag.trim_start_matches('#').to_string()));
+        }
+        self.name
+            .trim()
+            .split_once('#')
+            .map(|(n, t)| (n.to_string(), t.to_string()))
+            .ok_or_else(|| {
+                AppError::BadRequest("Give a Riot ID as Name#TAG, or send name and tag separately".into())
+            })
+    }
+}
+
+/// The identifiers that count as "us" when reading someone else's match: every
+/// roster player's puuid and Riot ID, lowercased.
+async fn roster_identifiers(pool: &SqlitePool) -> AppResult<Vec<String>> {
+    let rows: Vec<(String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT name, riot_id, puuid FROM players")
+            .fetch_all(pool)
+            .await?;
+    let mut out = Vec::new();
+    for (name, riot_id, puuid) in rows {
+        out.push(name.to_lowercase());
+        if let Some(r) = riot_id {
+            out.push(r.to_lowercase());
+        }
+        if let Some(p) = puuid {
+            out.push(p.to_lowercase());
+        }
+    }
+    Ok(out)
+}
+
+async fn henrik_sync(
+    State(st): State<AppState>,
+    Json(body): Json<HenrikBody>,
+) -> AppResult<Json<Value>> {
+    let cfg = henrik::HenrikConfig::from_env(&body.region, &body.platform)?;
+    let (name, tag) = body.name_and_tag()?;
+    let mut roster = roster_identifiers(&st.pool).await?;
+    // The player being synced always counts as one of us, even if their Riot
+    // ID is not on the roster yet.
+    roster.push(format!("{name}#{tag}").to_lowercase());
+
+    let mode = (!body.mode.trim().is_empty()).then(|| body.mode.clone());
+    let (matches, probe) =
+        henrik::fetch(&cfg, &name, &tag, &roster, mode.as_deref(), body.size).await?;
+    let report = import::apply(&st.pool, matches, &body.options).await?;
+    Ok(Json(json!({ "report": report, "probe": probe })))
+}
+
+/// Fetch without importing and report what the mapper could and could not read.
+/// This is the first thing to run when a sync misbehaves.
+async fn henrik_probe(
+    State(st): State<AppState>,
+    Json(body): Json<HenrikBody>,
+) -> AppResult<Json<Value>> {
+    let cfg = henrik::HenrikConfig::from_env(&body.region, &body.platform)?;
+    let (name, tag) = body.name_and_tag()?;
+    let mut roster = roster_identifiers(&st.pool).await?;
+    roster.push(format!("{name}#{tag}").to_lowercase());
+
+    let (matches, probe) = henrik::fetch(&cfg, &name, &tag, &roster, None, body.size).await?;
+    Ok(Json(json!({
+        "probe": probe,
+        "mapped_matches": matches.len(),
+        "sample": matches.first().map(|m| json!({
+            "external_id": m.external_id,
+            "played_at": m.played_at,
+            "map": m.map,
+            "mode": m.mode,
+            "score": format!("{}-{}", m.rounds_won, m.rounds_lost),
+            "players": m.performances.iter().map(|p| json!({
+                "player": p.player.label(),
+                "agent": p.agent,
+                "kda": format!("{}/{}/{}", p.kills, p.deaths, p.assists),
+                "acs": p.acs,
+            })).collect::<Vec<_>>(),
+        })),
+    })))
 }

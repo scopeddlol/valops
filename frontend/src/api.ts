@@ -269,6 +269,64 @@ export interface BuilderResult {
   map_record: string | null;
 }
 
+export interface ImportOptions {
+  dry_run?: boolean;
+  create_missing_players?: boolean;
+  skip_existing?: boolean;
+}
+
+export interface PreviewRow {
+  played_at: string;
+  map: string;
+  mode: string;
+  score: string;
+  result: Result;
+  players: number;
+  status: string;
+}
+
+export interface ImportReport {
+  dry_run: boolean;
+  imported: number;
+  skipped_duplicates: number;
+  skipped_empty: number;
+  performances: number;
+  created_players: string[];
+  unknown_players: string[];
+  warnings: string[];
+  preview: PreviewRow[];
+}
+
+export interface ProbeReport {
+  matches_seen: number;
+  resolved: [string, string][];
+  missing: string[];
+  observed_keys: [string, string[]][];
+  notes: string[];
+}
+
+export interface SourceInfo {
+  id: string;
+  name: string;
+  kind: string;
+  configured: boolean;
+  verified: boolean;
+  regions?: string[];
+  platforms?: string[];
+  setup?: string;
+  caveat?: string;
+}
+
+export interface HenrikRequest {
+  name: string;
+  tag?: string;
+  region: string;
+  platform: string;
+  mode: string;
+  size: number;
+  options?: ImportOptions;
+}
+
 export interface StatsFilter {
   days?: number | null;
   map?: string | null;
@@ -342,6 +400,38 @@ export const api = {
     if (exclude?.length) params.set('exclude', exclude.join(','));
     return request<BuilderResult>(`/builder?${params}`);
   },
+
+  sources: () => request<{ sources: SourceInfo[] }>('/sources'),
+
+  importJson: (bundle: unknown, options: ImportOptions) =>
+    request<ImportReport>('/import/json', {
+      method: 'POST',
+      body: JSON.stringify({ ...(bundle as object), options }),
+    }),
+
+  importCsv: (csv: string, options: ImportOptions) => {
+    const params = new URLSearchParams();
+    if (options.dry_run) params.set('dry_run', 'true');
+    if (options.create_missing_players === false) params.set('create_missing_players', 'false');
+    if (options.skip_existing === false) params.set('skip_existing', 'false');
+    return request<ImportReport>(`/import/csv?${params}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/csv' },
+      body: csv,
+    });
+  },
+
+  henrikSync: (req: HenrikRequest) =>
+    request<{ report: ImportReport; probe: ProbeReport }>('/sources/henrik/sync', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    }),
+
+  henrikProbe: (req: HenrikRequest) =>
+    request<{ probe: ProbeReport; mapped_matches: number; sample: unknown }>(
+      '/sources/henrik/probe',
+      { method: 'POST', body: JSON.stringify(req) },
+    ),
 
   seedDemo: (sessions?: number) =>
     request<{ players: number; matches: number }>(

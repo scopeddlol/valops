@@ -249,8 +249,8 @@ pub async fn generate(pool: &SqlitePool, sessions: usize) -> AppResult<(usize, u
             .to_string();
 
             let match_id: (i64,) = sqlx::query_as(
-                "INSERT INTO matches (played_at, map, mode, rounds_won, rounds_lost, notes) \
-                 VALUES (?, ?, 'Competitive', ?, ?, NULL) RETURNING id",
+                "INSERT INTO matches (played_at, map, mode, rounds_won, rounds_lost, notes, source) \
+                 VALUES (?, ?, 'Competitive', ?, ?, NULL, 'demo') RETURNING id",
             )
             .bind(&played_at)
             .bind(map)

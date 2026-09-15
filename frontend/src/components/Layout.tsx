@@ -14,6 +14,7 @@ export const Icons = {
   maps: icon(<><path d="M9 4.5 3 7v13l6-2.5 6 2.5 6-2.5V4L15 6.5z" /><path d="M9 4.5v13M15 6.5v13" /></>),
   agents: icon(<><circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="3" /><path d="M12 1.8v3.4M12 18.8v3.4M1.8 12h3.4M18.8 12h3.4" /></>),
   matches: icon(<><path d="M4 6h16M4 12h16M4 18h10" /><circle cx="19.5" cy="18" r="1.6" /></>),
+  import: icon(<><path d="M12 3v12" /><path d="m7.5 10.5 4.5 4.5 4.5-4.5" /><path d="M4 17v2.5A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5V17" /></>),
   builder: icon(<><path d="M12 3v3M12 18v3M3 12h3M18 12h3" /><path d="m6.5 6.5 2.2 2.2M15.3 15.3l2.2 2.2M17.5 6.5l-2.2 2.2M8.7 15.3l-2.2 2.2" /><circle cx="12" cy="12" r="3.4" /></>),
 };
 
@@ -24,6 +25,7 @@ const NAV = [
   { to: '/maps', label: 'Maps', icon: Icons.maps, end: false },
   { to: '/agents', label: 'Agents', icon: Icons.agents, end: false },
   { to: '/matches', label: 'Matches', icon: Icons.matches, end: false },
+  { to: '/import', label: 'Import', icon: Icons.import, end: false },
 ];
 
 export function Sidebar() {
