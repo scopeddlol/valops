@@ -17,7 +17,6 @@ use crate::models::{result_of, PlayerInput};
 /// export knows our own ids, a spreadsheet knows names, an API knows puuids.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayerRef {
-    Id(i64),
     Puuid(String),
     /// "Name#TAG"
     RiotId(String),
@@ -27,7 +26,6 @@ pub enum PlayerRef {
 impl PlayerRef {
     pub fn label(&self) -> String {
         match self {
-            PlayerRef::Id(id) => format!("#{id}"),
             PlayerRef::Puuid(p) => format!("puuid {}", &p[..p.len().min(8)]),
             PlayerRef::RiotId(r) => r.clone(),
             PlayerRef::Name(n) => n.clone(),
@@ -50,6 +48,22 @@ pub struct IncomingPerformance {
     pub first_deaths: i64,
     pub plants: i64,
     pub defuses: i64,
+}
+
+/// One unit of work for [`apply`]: the matches, plus whatever the source knows
+/// about the people in them.
+#[derive(Debug, Default)]
+pub struct ImportBatch {
+    /// Roster metadata (role, rank, Riot ID). Without this a restore would
+    /// rebuild players from scoreboard rows alone and silently drop all of it.
+    pub players: Vec<PlayerInput>,
+    pub matches: Vec<IncomingMatch>,
+}
+
+impl ImportBatch {
+    pub fn matches_only(matches: Vec<IncomingMatch>) -> Self {
+        Self { players: Vec::new(), matches }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -154,7 +168,6 @@ impl Roster {
     /// a Riot ID rarely does, a display name is a guess.
     fn resolve(&self, who: &PlayerRef) -> Option<i64> {
         match who {
-            PlayerRef::Id(id) => self.by_id.contains_key(id).then_some(*id),
             PlayerRef::Puuid(p) => self.by_puuid.get(&p.to_lowercase()).copied(),
             PlayerRef::RiotId(r) => self
                 .by_riot_id
@@ -184,7 +197,7 @@ impl Roster {
 /// Write (or, in a dry run, describe) a batch of matches.
 pub async fn apply(
     pool: &SqlitePool,
-    matches: Vec<IncomingMatch>,
+    batch: ImportBatch,
     opts: &ImportOptions,
 ) -> AppResult<ImportReport> {
     let mut report = ImportReport { dry_run: opts.dry_run, ..Default::default() };
@@ -194,7 +207,47 @@ pub async fn apply(
     // half-imported history behind. A dry run rolls back at the end.
     let mut tx = pool.begin().await?;
 
-    for incoming in matches {
+    // Roster first, so scoreboard rows attach to players who already carry
+    // their role and rank rather than to bare names created on the fly.
+    if opts.create_missing_players {
+        for hint in &batch.players {
+            let name = hint.name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let known = roster
+                .resolve(&PlayerRef::Name(name.to_string()))
+                .or_else(|| hint.puuid.clone().and_then(|p| roster.resolve(&PlayerRef::Puuid(p))))
+                .or_else(|| {
+                    hint.riot_id.clone().and_then(|r| roster.resolve(&PlayerRef::RiotId(r)))
+                });
+            if known.is_some() {
+                // Already on the roster — their current details win.
+                continue;
+            }
+            report.created_players.push(name.to_string());
+            if opts.dry_run {
+                let placeholder = -(report.created_players.len() as i64);
+                roster.insert(placeholder, name.to_string(), hint.riot_id.as_deref(), hint.puuid.as_deref());
+                continue;
+            }
+            let row: (i64,) = sqlx::query_as(
+                "INSERT INTO players (name, riot_id, role, rank, active, puuid) \
+                 VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+            )
+            .bind(name)
+            .bind(hint.riot_id.as_deref())
+            .bind(hint.role.trim())
+            .bind(hint.rank.as_deref())
+            .bind(hint.active)
+            .bind(hint.puuid.as_deref())
+            .fetch_one(&mut *tx)
+            .await?;
+            roster.insert(row.0, name.to_string(), hint.riot_id.as_deref(), hint.puuid.as_deref());
+        }
+    }
+
+    for incoming in batch.matches {
         if incoming.map.trim().is_empty() {
             report.warnings.push("Skipped a match with no map".into());
             continue;
@@ -436,11 +489,12 @@ pub struct JsonPerformance {
 /// Note that `player_id` from the export is deliberately ignored: restoring
 /// into a database that already has a roster would otherwise attach
 /// scoreboards to whoever happens to hold that id now.
-pub fn from_json(bundle: JsonBundle) -> AppResult<Vec<IncomingMatch>> {
+pub fn from_json(bundle: JsonBundle) -> AppResult<ImportBatch> {
     if bundle.matches.is_empty() {
         return Err(AppError::BadRequest("That file has no matches in it".into()));
     }
-    Ok(bundle
+    let players = bundle.players;
+    let matches = bundle
         .matches
         .into_iter()
         .map(|m| IncomingMatch {
@@ -481,7 +535,8 @@ pub fn from_json(bundle: JsonBundle) -> AppResult<Vec<IncomingMatch>> {
                 })
                 .collect(),
         })
-        .collect())
+        .collect();
+    Ok(ImportBatch { players, matches })
 }
 
 // ---------------------------------------------------------------------------
@@ -515,7 +570,7 @@ pub const CSV_TEMPLATE: &str = "played_at,map,mode,rounds_won,rounds_lost,player
 ///
 /// Rows are grouped into a match by (played_at, map): a five-stack's scoreboard
 /// is five consecutive rows sharing those two columns.
-pub fn from_csv(body: &str) -> AppResult<Vec<IncomingMatch>> {
+pub fn from_csv(body: &str) -> AppResult<ImportBatch> {
     let mut lines = body.lines().filter(|l| !l.trim().is_empty());
     let header = lines
         .next()
@@ -603,7 +658,9 @@ pub fn from_csv(body: &str) -> AppResult<Vec<IncomingMatch>> {
     if order.is_empty() {
         return Err(AppError::BadRequest("That CSV has a header but no rows".into()));
     }
-    Ok(order.into_iter().filter_map(|k| grouped.remove(&k)).collect())
+    Ok(ImportBatch::matches_only(
+        order.into_iter().filter_map(|k| grouped.remove(&k)).collect(),
+    ))
 }
 
 #[cfg(test)]
@@ -628,7 +685,7 @@ mod tests {
                    2026-09-15T20:00:00,Ascent,13,7,Vex,Jett,22,14\n\
                    2026-09-15T20:00:00,Ascent,13,7,Nyx,Omen,15,16\n\
                    2026-09-15T21:00:00,Lotus,9,13,Vex,Raze,18,18\n";
-        let matches = from_csv(csv).unwrap();
+        let matches = from_csv(csv).unwrap().matches;
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].map, "Ascent");
         assert_eq!(matches[0].performances.len(), 2);
@@ -646,7 +703,7 @@ mod tests {
     #[test]
     fn csv_accepts_a_riot_id_as_the_player() {
         let csv = "played_at,map,player,agent\n2026-09-15,Bind,Vex#EUW,Raze\n";
-        let matches = from_csv(csv).unwrap();
+        let matches = from_csv(csv).unwrap().matches;
         assert_eq!(matches[0].performances[0].player, PlayerRef::RiotId("Vex#EUW".into()));
         assert_eq!(matches[0].performances[0].riot_id.as_deref(), Some("Vex#EUW"));
     }
@@ -660,7 +717,7 @@ mod tests {
                  "rounds_lost":5,"performances":[{"player_id":99,"player_name":"Vex","agent":"Jett"}]}]}"#,
         )
         .unwrap();
-        let out = from_json(bundle).unwrap();
+        let out = from_json(bundle).unwrap().matches;
         assert_eq!(out[0].performances[0].player, PlayerRef::Name("Vex".into()));
     }
 }

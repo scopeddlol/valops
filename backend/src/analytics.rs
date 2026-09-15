@@ -112,8 +112,7 @@ pub async fn load_performances(pool: &SqlitePool, match_ids: &[i64]) -> AppResul
         return Ok(Vec::new());
     }
     // SQLite has no array binding; build a placeholder list for the id set.
-    let placeholders = std::iter::repeat("?")
-        .take(match_ids.len())
+    let placeholders = std::iter::repeat_n("?", match_ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(

@@ -407,8 +407,8 @@ async fn import_json(
     State(st): State<AppState>,
     Json(body): Json<JsonImportBody>,
 ) -> AppResult<Json<import::ImportReport>> {
-    let matches = import::from_json(body.bundle)?;
-    let report = import::apply(&st.pool, matches, &body.options).await?;
+    let batch = import::from_json(body.bundle)?;
+    let report = import::apply(&st.pool, batch, &body.options).await?;
     Ok(Json(report))
 }
 
@@ -433,13 +433,13 @@ async fn import_csv(
     Query(q): Query<CsvQuery>,
     body: String,
 ) -> AppResult<Json<import::ImportReport>> {
-    let matches = import::from_csv(&body)?;
+    let batch = import::from_csv(&body)?;
     let opts = ImportOptions {
         dry_run: q.dry_run,
         create_missing_players: q.create_missing_players,
         skip_existing: q.skip_existing,
     };
-    Ok(Json(import::apply(&st.pool, matches, &opts).await?))
+    Ok(Json(import::apply(&st.pool, batch, &opts).await?))
 }
 
 async fn csv_template() -> impl axum::response::IntoResponse {
@@ -574,7 +574,8 @@ async fn henrik_sync(
     let mode = (!body.mode.trim().is_empty()).then(|| body.mode.clone());
     let (matches, probe) =
         henrik::fetch(&cfg, &name, &tag, &roster, mode.as_deref(), body.size).await?;
-    let report = import::apply(&st.pool, matches, &body.options).await?;
+    let report =
+        import::apply(&st.pool, import::ImportBatch::matches_only(matches), &body.options).await?;
     Ok(Json(json!({ "report": report, "probe": probe })))
 }
 

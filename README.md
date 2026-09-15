@@ -1,5 +1,7 @@
 # valops
 
+[![Docker](https://github.com/scopeddlol/valops/actions/workflows/docker.yml/badge.svg)](https://github.com/scopeddlol/valops/actions/workflows/docker.yml)
+
 A self-hosted stats desk for a Valorant five-stack. Log your matches, see which
 maps you actually win on, and get a comp built from your own history rather than
 somebody else's tier list.
@@ -8,8 +10,15 @@ One container, one SQLite file. Nothing leaves your machine, and no Riot API key
 is needed.
 
 ```bash
-docker compose up -d --build   # then open http://localhost:8080
+# Run the published image
+docker run -d --name valops -p 8080:8080 -v valops-data:/app/data \
+  ghcr.io/scopeddlol/valops:latest
+
+# …or build it yourself
+docker compose up -d --build
 ```
+
+Then open http://localhost:8080.
 
 The first run seeds a realistic six-month demo history so there is something to
 look at immediately. Wipe it from **Matches → Data → Delete all data**, or start
@@ -228,6 +237,31 @@ curl -X POST http://localhost:8080/api/matches \
     ]
   }'
 ```
+
+## Published images
+
+Every push to `main` publishes `ghcr.io/scopeddlol/valops:latest`; version tags
+(`v1.2.3`) publish `1.2.3`, `1.2` and `latest`. Every commit also gets a
+`sha-<short>` tag, so you can pin to an exact build and roll back to it.
+
+Pull requests build the image too, without publishing — that is what keeps the
+Dockerfile working between releases.
+
+To use the published image with compose, swap the `build:` line in
+`docker-compose.yml` for:
+
+```yaml
+    image: ghcr.io/scopeddlol/valops:latest
+```
+
+GHCR packages start out **private**. If you want the rest of the stack to pull
+without authenticating, open the package under the repository's *Packages* tab
+and change its visibility to public; otherwise each of them needs a
+`docker login ghcr.io` with a token that has `read:packages`.
+
+Images are `linux/amd64`. If you self-host on ARM (a Pi, an Apple silicon
+machine, a Graviton box) see the note at the top of
+`.github/workflows/docker.yml`.
 
 ## Stack
 

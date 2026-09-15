@@ -1,5 +1,7 @@
 services:
   valops:
+    # To run the published image instead of building, replace these two lines
+    # with:  image: ghcr.io/scopeddlol/valops:latest
     build: .
     image: valops:latest
     container_name: valops
